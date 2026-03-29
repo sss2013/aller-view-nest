@@ -35,6 +35,7 @@ export class PlacesService {
                     radius: 500.0, // 500미터 반경
                 },
             },
+            languageCode: 'ko', //
         };
 
         const { data } = await firstValueFrom(
@@ -45,8 +46,7 @@ export class PlacesService {
                     headers: {
                         'Content-Type': 'application/json',
                         'X-Goog-Api-Key': this.apiKey,
-                        // 중요: 필요한 필드만 요청하여 비용 절감
-                        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.location',
+                        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.location,places.primaryTypeDisplayName,places.rating',
                     },
                 }
             )
