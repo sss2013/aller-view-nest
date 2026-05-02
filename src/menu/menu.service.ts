@@ -19,7 +19,7 @@ export class MenuService {
     private readonly categoryVectorRepo: Repository<DishCategoryVector>,
     @InjectRepository(Allergy)
     private readonly allergyRepo: Repository<Allergy>,
-  ) {}
+  ) { }
 
   async analyze(dto: AnalyzeMenuDto) {
     // 1. 알레르기 이름 → ID 조회
