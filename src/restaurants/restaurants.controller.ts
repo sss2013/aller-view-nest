@@ -23,6 +23,7 @@ export class RestaurantsController {
   async getNearbyRestaurants(
     @Query('lat') lat: string,
     @Query('lng') lng: string,
+    @Query('allergy_ids') allergyIds?: string,
   ) {
     const parsedLat = Number(lat);
     const parsedLng = Number(lng);
@@ -34,13 +35,43 @@ export class RestaurantsController {
       );
     }
 
+    const parsedAllergyIds = allergyIds
+      ? allergyIds.split(',').map(Number).filter((n) => !Number.isNaN(n))
+      : [];
+
     try {
       console.log(`Fetching nearby restaurants for lat: ${parsedLat}, lng: ${parsedLng}`);
-      return await this.restaurantsService.searchNearbyRestaurants(parsedLat, parsedLng);
+      return await this.restaurantsService.searchNearbyRestaurants(parsedLat, parsedLng, parsedAllergyIds);
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       console.error('Google Restaurants API error:', (error as any).response?.data || err.message);
       throw new HttpException('Failed to fetch restaurants', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  @Get('search')
+  async searchRestaurants(
+    @Query('q') q: string,
+    @Query('lat') lat?: string,
+    @Query('lng') lng?: string,
+    @Query('allergy_ids') allergyIds?: string,
+  ) {
+    if (!q || !q.trim()) {
+      throw new HttpException('q is required', HttpStatus.BAD_REQUEST);
+    }
+
+    const parsedLat = lat ? parseFloat(lat) : undefined;
+    const parsedLng = lng ? parseFloat(lng) : undefined;
+    const parsedAllergyIds = allergyIds
+      ? allergyIds.split(',').map(Number).filter((n) => !Number.isNaN(n))
+      : [];
+
+    try {
+      return await this.restaurantsService.searchByText(q.trim(), parsedLat, parsedLng, parsedAllergyIds);
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.error('Restaurant search error:', err.message);
+      throw new HttpException('Failed to search restaurants', HttpStatus.INTERNAL_SERVER_ERROR);
     }
   }
 

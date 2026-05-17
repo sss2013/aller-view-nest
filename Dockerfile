@@ -1,5 +1,5 @@
 # Step 1: Build 환경
-FROM node:16 AS builder
+FROM node:20 AS builder
 WORKDIR /usr/src/app
 
 # package.json 및 package-lock.json 복사
@@ -14,9 +14,8 @@ COPY . .
 # 애플리케이션 빌드
 RUN npm run build
 
-
 # Step 2: Production 실행 환경
-FROM node:16
+FROM node:20
 WORKDIR /usr/src/app
 
 # 빌드된 파일 및 의존성 복사

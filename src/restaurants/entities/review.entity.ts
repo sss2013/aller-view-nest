@@ -4,9 +4,11 @@ import {
   Entity,
   JoinColumn,
   ManyToOne,
+  OneToMany,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { Restaurant } from './restaurant.entity';
+import { ReviewMenuItem } from './review-menu-item.entity';
 
 @Entity('reviews')
 export class Review {
@@ -19,11 +21,11 @@ export class Review {
   @Column()
   restaurant_id!: number;
 
-  @Column()
-  positive!: boolean;
-
   @Column({ type: 'text', nullable: true })
   content!: string | null;
+
+  @Column({ type: 'text', array: true, default: '{}' })
+  allergies!: string[];
 
   @CreateDateColumn()
   created_at!: Date;
@@ -31,4 +33,7 @@ export class Review {
   @ManyToOne(() => Restaurant, (restaurant) => restaurant.reviews)
   @JoinColumn({ name: 'restaurant_id' })
   restaurant!: Restaurant;
+
+  @OneToMany(() => ReviewMenuItem, (item) => item.review)
+  menuItems!: ReviewMenuItem[];
 }
