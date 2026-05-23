@@ -4,7 +4,6 @@ import { AppService } from './app.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CacheModule } from '@nestjs/cache-manager';
-import { RabbitModule } from './rabbit.module';
 import { RestaurantsModule } from './restaurants/restaurants.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
@@ -21,7 +20,6 @@ import { UpstashModule } from './upstash.module';
       isGlobal: true,
       ttl: 3600 * 1000,
     }),
-    RabbitModule,
     UpstashModule,
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],

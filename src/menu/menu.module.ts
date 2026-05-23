@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MenuController } from './menu.controller';
 import { MenuService } from './menu.service';
-import { MenuWorker } from './menu.worker';
 import { Dish } from './entities/dish.entity';
 import { DishAllergenCache } from './entities/dish-allergen-cache.entity';
 import { DishCategoryVector } from './entities/dish-category-vector.entity';
@@ -15,6 +14,6 @@ import { AuthModule } from '../auth/auth.module';
     AuthModule,
   ],
   controllers: [MenuController],
-  providers: [MenuService, MenuWorker],
+  providers: [MenuService],
 })
 export class MenuModule { }

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Post } from '@nestjs/common';
 import { MenuService } from './menu.service';
 import { AnalyzeMenuDto } from './dto/analyze-menu.dto';
 import { GetDishDetailsDto } from './dto/get-dish-details.dto';
@@ -12,9 +12,9 @@ export class MenuController {
     return this.menuService.analyze(dto);
   }
 
-  @Get('analyze/:jobId')
-  getJobResult(@Param('jobId') jobId: string) {
-    return this.menuService.getJobResult(jobId);
+  @Delete('dishes')
+  deleteDishesByNames(@Body('names') names: string[]) {
+    return this.menuService.deleteDishesByNames(names);
   }
 
   @Post('details')

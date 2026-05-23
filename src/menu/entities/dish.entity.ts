@@ -19,4 +19,10 @@ export class Dish {
 
   @Column({ type: 'int', nullable: true })
   calorie_max!: number | null;
+
+  @Column({ type: 'text', nullable: true })
+  description!: string | null;
+
+  @Column({ type: 'text', array: true, nullable: true })
+  ingredients!: string[] | null;
 }
