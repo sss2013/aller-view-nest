@@ -13,4 +13,13 @@ export class DishCategoryVector {
 
   @Column({ type: 'numeric', default: 0 })
   vegetable_ratio!: number;
+
+  @Column({ type: 'numeric', default: 0 })
+  spicy_ratio!: number;
+
+  @Column({ type: 'numeric', default: 0 })
+  salty_ratio!: number;
+
+  @Column({ type: 'numeric', default: 0 })
+  sweet_ratio!: number;
 }

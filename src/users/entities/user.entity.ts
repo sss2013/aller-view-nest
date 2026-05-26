@@ -22,6 +22,9 @@ export class User {
   @Column({ length: 100, unique: true })
   email!: string;
 
+  @Column({ type: 'text', nullable: true })
+  avatar_url!: string | null;
+
   @CreateDateColumn()
   created_at!: Date;
 

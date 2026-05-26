@@ -269,11 +269,13 @@ export class RestaurantsService {
     const userIds = [...new Set(reviews.map((r) => r.user_id))];
 
     const usernameMap = new Map<number, string>();
+    const avatarMap = new Map<number, string | null>();
 
     if (userIds.length > 0) {
       const users = await this.userRepo.find({ where: { id: In(userIds) } });
       for (const u of users) {
         usernameMap.set(u.id, u.username);
+        avatarMap.set(u.id, u.avatar_url ?? null);
       }
     }
 
@@ -285,6 +287,7 @@ export class RestaurantsService {
         id: r.id,
         user_id: r.user_id,
         username: usernameMap.get(r.user_id) ?? null,
+        avatar_url: avatarMap.get(r.user_id) ?? null,
         allergies: r.allergies,
         menu_items: r.menuItems ?? [],
         content: r.content,

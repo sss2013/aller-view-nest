@@ -29,6 +29,9 @@ interface LlmAnalysisItem {
   meat_ratio: number;
   seafood_ratio: number;
   vegetable_ratio: number;
+  spicy_ratio: number;
+  salty_ratio: number;
+  sweet_ratio: number;
 }
 
 function buildAnalyzePrompt(nameList: string): string {
@@ -43,10 +46,11 @@ ${nameList}
    계란, 우유, 메밀, 땅콩, 대두, 밀, 고등어, 게, 새우, 돼지고기, 복숭아, 토마토, 아황산류, 호두, 닭고기, 쇠고기, 오징어, 굴, 전복, 홍합, 잣, 추출성분
 4. 칼로리: 1인분 기준 최소/최대 추정 (kcal 정수)
 5. 카테고리 비율: meat_ratio(육류), seafood_ratio(해산물), vegetable_ratio(채소/기타) — 합이 1.0
+6. 맛 프로파일(0.0~1.0): spicy_ratio(매운 정도), salty_ratio(짠 정도), sweet_ratio(단 정도) — 독립 수치, 합이 1일 필요 없음
 
 JSON 배열 형식으로만 응답 (순서 유지):
 [
-  { "name": "음식명", "english_name": "Pad Thai", "image_search_query": "Thai pad thai stir fried noodles shrimp", "allergens": ["새우"], "calorie_min": 400, "calorie_max": 600, "meat_ratio": 0.30, "seafood_ratio": 0.20, "vegetable_ratio": 0.50 }
+  { "name": "음식명", "english_name": "Pad Thai", "image_search_query": "Thai pad thai stir fried noodles shrimp", "allergens": ["새우"], "calorie_min": 400, "calorie_max": 600, "meat_ratio": 0.30, "seafood_ratio": 0.20, "vegetable_ratio": 0.50, "spicy_ratio": 0.3, "salty_ratio": 0.5, "sweet_ratio": 0.1 }
 ]`;
 }
 
@@ -74,6 +78,9 @@ function parseLlmItem(item: any, defaultItem: LlmAnalysisItem): LlmAnalysisItem 
     meat_ratio: typeof item.meat_ratio === 'number' ? item.meat_ratio : 0,
     seafood_ratio: typeof item.seafood_ratio === 'number' ? item.seafood_ratio : 0,
     vegetable_ratio: typeof item.vegetable_ratio === 'number' ? item.vegetable_ratio : 0,
+    spicy_ratio: typeof item.spicy_ratio === 'number' ? item.spicy_ratio : 0,
+    salty_ratio: typeof item.salty_ratio === 'number' ? item.salty_ratio : 0,
+    sweet_ratio: typeof item.sweet_ratio === 'number' ? item.sweet_ratio : 0,
   };
 }
 
@@ -176,7 +183,15 @@ export class MenuService {
 
           await Promise.all([
             this.allergenCacheRepo.save({ dish_id: newDish.id, allergy_ids: allergyIds }),
-            this.categoryVectorRepo.save({ dish_id: newDish.id, meat_ratio, seafood_ratio, vegetable_ratio }),
+            this.categoryVectorRepo.save({
+              dish_id: newDish.id,
+              meat_ratio,
+              seafood_ratio,
+              vegetable_ratio,
+              spicy_ratio: Math.min(1, Math.max(0, analysis.spicy_ratio)),
+              salty_ratio: Math.min(1, Math.max(0, analysis.salty_ratio)),
+              sweet_ratio: Math.min(1, Math.max(0, analysis.sweet_ratio)),
+            }),
           ]);
 
           const imageQuery = analysis.image_search_query || analysis.english_name || normalized_text;
@@ -298,33 +313,36 @@ export class MenuService {
   }
 
   private async computeRecommendations(dto: AnalyzeMenuDto, menu_results: any[]) {
-    const recommendations: { item_id: string; korean_name: string | null }[] = [];
-
     const safeDishIds = menu_results
       .filter((r) => r.risk_level === 'safe')
       .map((r) => r.dish_id as number);
 
-    if (safeDishIds.length > 0) {
-      const vectors = await this.categoryVectorRepo.find({ where: { dish_id: In(safeDishIds) } });
-      const dishes = await this.dishRepo.find({ where: { id: In(safeDishIds) } });
-      const dishMap = new Map(dishes.map((d) => [d.id, d]));
-      const dishIdToItemId = new Map(
-        menu_results.filter((r) => r.dish_id).map((r) => [r.dish_id as number, r.item_id]),
-      );
-
-      const { meat, seafood, vegetarian } = dto.user_preferences;
-      const prefSum = meat + seafood + vegetarian || 1;
-
-      const scored = vectors.map((vec) => ({
-        item_id: dishIdToItemId.get(vec.dish_id) ?? '',
-        korean_name: dishMap.get(vec.dish_id)?.korean_name ?? null,
-        score: (meat * Number(vec.meat_ratio) + seafood * Number(vec.seafood_ratio) + vegetarian * Number(vec.vegetable_ratio)) / prefSum,
-      }));
-      scored.sort((a, b) => b.score - a.score);
-      recommendations.push(...scored.slice(0, 3).map(({ item_id, korean_name }) => ({ item_id, korean_name })));
+    if (safeDishIds.length === 0) {
+      return { menu_results, recommendations: { category: [], taste: [] } };
     }
 
-    return { menu_results, recommendations };
+    const vectors = await this.categoryVectorRepo.find({ where: { dish_id: In(safeDishIds) } });
+    const dishes = await this.dishRepo.find({ where: { id: In(safeDishIds) } });
+    const dishMap = new Map(dishes.map((d) => [d.id, d]));
+    const dishIdToItemId = new Map(
+      menu_results.filter((r) => r.dish_id).map((r) => [r.dish_id as number, r.item_id]),
+    );
+
+    const { meat, seafood, vegetarian, spicy, salty, sweet } = dto.user_preferences;
+    const catSum = (meat + seafood + vegetarian) || 1;
+    const tasteSum = (spicy + salty + sweet) || 1;
+
+    const base = vectors.map((vec) => ({
+      item_id: dishIdToItemId.get(vec.dish_id) ?? '',
+      korean_name: dishMap.get(vec.dish_id)?.korean_name ?? null,
+      catScore: (meat * Number(vec.meat_ratio) + seafood * Number(vec.seafood_ratio) + vegetarian * Number(vec.vegetable_ratio)) / catSum,
+      tasteScore: (spicy * Number(vec.spicy_ratio) + salty * Number(vec.salty_ratio) + sweet * Number(vec.sweet_ratio)) / tasteSum,
+    }));
+
+    const category = [...base].sort((a, b) => b.catScore - a.catScore).slice(0, 3).map(({ item_id, korean_name }) => ({ item_id, korean_name }));
+    const taste = [...base].sort((a, b) => b.tasteScore - a.tasteScore).slice(0, 3).map(({ item_id, korean_name }) => ({ item_id, korean_name }));
+
+    return { menu_results, recommendations: { category, taste } };
   }
 
   private async analyzeBatch(menuNames: string[]) {
@@ -337,7 +355,7 @@ export class MenuService {
   }
 
   private async analyzeBatchWithGroq(menuNames: string[]) {
-    const defaultItem = { english_name: '', image_search_query: '', allergens: [], calorie_min: null, calorie_max: null, meat_ratio: 0, seafood_ratio: 0, vegetable_ratio: 0 };
+    const defaultItem = { english_name: '', image_search_query: '', allergens: [], calorie_min: null, calorie_max: null, meat_ratio: 0, seafood_ratio: 0, vegetable_ratio: 0, spicy_ratio: 0, salty_ratio: 0, sweet_ratio: 0 };
     const nameList = menuNames.map((n, i) => `${i + 1}. ${n}`).join('\n');
     const prompt = buildAnalyzePrompt(nameList);
 
@@ -363,7 +381,7 @@ export class MenuService {
   }
 
   private async analyzeBatchWithGemini(menuNames: string[]) {
-    const defaultItem = { english_name: '', image_search_query: '', allergens: [], calorie_min: null, calorie_max: null, meat_ratio: 0, seafood_ratio: 0, vegetable_ratio: 0 };
+    const defaultItem = { english_name: '', image_search_query: '', allergens: [], calorie_min: null, calorie_max: null, meat_ratio: 0, seafood_ratio: 0, vegetable_ratio: 0, spicy_ratio: 0, salty_ratio: 0, sweet_ratio: 0 };
     const defaults = menuNames.map(() => ({ ...defaultItem }));
 
     const MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-Lite', 'gemini-3-flash', 'gemini-3.1-flash-Lite'];

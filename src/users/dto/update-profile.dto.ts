@@ -1,4 +1,4 @@
-import { IsArray, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsOptional, IsString, IsUrl } from 'class-validator';
 
 export class UpdateProfileDto {
   @IsOptional()
@@ -14,4 +14,8 @@ export class UpdateProfileDto {
   @IsArray()
   @IsString({ each: true })
   preferred_ingredients?: string[];
+
+  @IsOptional()
+  @IsUrl()
+  avatar_url?: string;
 }

@@ -38,6 +38,7 @@ export class UsersService {
       nickname: user.username,
       allergies: user.userAllergies.map((ua) => ua.allergy.name),
       preferred_ingredients: user.userPreferredIngredients.map((upi) => upi.ingredient.name),
+      avatar_url: user.avatar_url ?? null,
       created_at: user.created_at,
     };
   }
@@ -46,8 +47,9 @@ export class UsersService {
     const user = await this.userRepo.findOne({ where: { supabase_uid: supabaseUid } });
     if (!user) throw new NotFoundException('사용자를 찾을 수 없습니다.');
 
-    if (dto.nickname) {
-      user.username = dto.nickname;
+    if (dto.nickname !== undefined) user.username = dto.nickname;
+    if (dto.avatar_url !== undefined) user.avatar_url = dto.avatar_url;
+    if (dto.nickname !== undefined || dto.avatar_url !== undefined) {
       await this.userRepo.save(user);
     }
 
