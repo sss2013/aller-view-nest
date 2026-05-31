@@ -1,8 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import type { Cache } from 'cache-manager';
+import type { Redis } from '@upstash/redis';
+import { UPSTASH_REDIS } from '../upstash.module';
 import { ConfigService } from '@nestjs/config';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Groq from 'groq-sdk';
@@ -102,8 +102,8 @@ export class MenuService {
     private readonly categoryVectorRepo: Repository<DishCategoryVector>,
     @InjectRepository(Allergy)
     private readonly allergyRepo: Repository<Allergy>,
-    @Inject(CACHE_MANAGER)
-    private readonly cache: Cache,
+    @Inject(UPSTASH_REDIS)
+    private readonly redis: Redis,
     private readonly configService: ConfigService,
   ) {
     this.gemini = new GoogleGenerativeAI(this.configService.get<string>('GEMINI_API_KEY') ?? '');
@@ -130,7 +130,7 @@ export class MenuService {
 
     for (const item of dto.menu_items) {
       const cacheKey = `menu:dish:${item.normalized_text.replace(/\s+/g, '').toLowerCase()}`;
-      const cached = await this.cache.get<DishCacheEntry>(cacheKey);
+      const cached = await this.redis.get<DishCacheEntry>(cacheKey);
       if (cached) { dishDataMap.set(item.item_id, cached); continue; }
 
       const nameNoSpace = item.normalized_text.replace(/\s+/g, '');
@@ -142,7 +142,7 @@ export class MenuService {
       if (existingDish) {
         const allergenCache = await this.allergenCacheRepo.findOne({ where: { dish_id: existingDish.id } });
         const entry: DishCacheEntry = { dish_id: existingDish.id, allergy_ids: allergenCache?.allergy_ids ?? [] };
-        await this.cache.set(cacheKey, entry, 86400 * 1000);
+        await this.redis.set(cacheKey, entry, { ex: 86400 });
         dishDataMap.set(item.item_id, entry);
         continue;
       }
@@ -199,7 +199,7 @@ export class MenuService {
           recipeQueue.push({ dishId: newDish.id, name: normalized_text });
 
           const entry: DishCacheEntry = { dish_id: newDish.id, allergy_ids: allergyIds };
-          await this.cache.set(cacheKey, entry, 86400 * 1000);
+          await this.redis.set(cacheKey, entry, { ex: 86400 });
           dishDataMap.set(item_id, entry);
         }),
       );
@@ -253,7 +253,7 @@ export class MenuService {
     // L1 캐시에서도 제거
     await Promise.all(
       dishes.map((d) =>
-        this.cache.del(`menu:dish:${(d.korean_name ?? '').replace(/\s+/g, '').toLowerCase()}`),
+        this.redis.del(`menu:dish:${(d.korean_name ?? '').replace(/\s+/g, '').toLowerCase()}`),
       ),
     );
 
