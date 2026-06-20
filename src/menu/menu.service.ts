@@ -238,7 +238,7 @@ export class MenuService {
       const analyses = chunkResults.flat();
       this.logger.log(`[TIMING] LLM 배치 호출: ${Date.now() - tLlm}ms (${missItems.length}개, ${chunks.length}청크 병렬)`);
 
-      const tDb = Date.now(); // eslint-disable-line @typescript-eslint/no-unused-vars
+      const tDb = Date.now();
       const imageUploadQueue: { query: string; dishId: number }[] = [];
       const recipeQueue: { dishId: number; name: string }[] = [];
 
@@ -294,6 +294,7 @@ export class MenuService {
           dishDataMap.set(item_id, entry);
         }),
       );
+      this.logger.log(`[TIMING] DB 저장: ${Date.now() - tDb}ms`);
 
       // 이미지 업로드는 순차 실행 (CDN 쓰로틀링 방지)
       (async () => {
@@ -450,6 +451,7 @@ export class MenuService {
 
     for (const model of GROQ_MODELS) {
       try {
+        const t = Date.now();
         const completion = await this.groq.chat.completions.create({
           model,
           messages: [{ role: 'user', content: prompt }],
@@ -473,7 +475,7 @@ export class MenuService {
     const defaultItem = { english_name: '', image_search_query: '', allergens: [], calorie_min: null, calorie_max: null, meat_ratio: 0, seafood_ratio: 0, vegetable_ratio: 0, spicy_ratio: 0, salty_ratio: 0, sweet_ratio: 0 };
     const defaults = menuNames.map(() => ({ ...defaultItem }));
 
-    const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash','gemini-3.1-flash-lite','gemini-2.5-flash-lite'];
+    const MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
     const nameList = menuNames.map((n, i) => `${i + 1}. ${n}`).join('\n');
     const prompt = buildAnalyzePrompt(nameList, departureLanguage);
 
@@ -483,7 +485,6 @@ export class MenuService {
           model: modelName,
           generationConfig: { thinkingConfig: { thinkingBudget: 1024 } } as any,
         });
-        this.logger.log(`[LLM] Gemini 폴백 사용: ${modelName}`);
         const result = await model.generateContent(prompt);
         const text = result.response.text().trim();
         const jsonMatch = text.match(/\[[\s\S]*\]/);
@@ -530,13 +531,13 @@ export class MenuService {
     }
     if (!groqSuccess) {
       this.logger.warn('모든 Groq recipe 모델 실패, Gemini 폴백');
-const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash','gemini-3.1-flash-lite','gemini-2.5-flash-lite'];      for (const modelName of MODELS) {
+      const MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
+      for (const modelName of MODELS) {
         try {
           const model = this.gemini.getGenerativeModel({
             model: modelName,
             generationConfig: { thinkingConfig: { thinkingBudget: 512 } } as any,
           });
-          this.logger.log(`[LLM] 레시피 Gemini 폴백 사용: ${modelName}`);
           const result = await model.generateContent(prompt);
           const text = result.response.text().trim();
           const jsonMatch = text.match(/\[[\s\S]*\]/);
@@ -551,7 +552,6 @@ const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash','gemini-3.1-flash-lite','
 
     if (parsed.length === 0) { this.logger.warn('레시피 LLM 응답 없음'); return; }
 
-    const tRecipe = Date.now();
     await Promise.all(
       items.map(async ({ dishId }, i) => {
         const item = parsed[i];
@@ -559,9 +559,9 @@ const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash','gemini-3.1-flash-lite','
         const description = typeof item.description === 'string' ? item.description : null;
         const ingredients = Array.isArray(item.ingredients) ? item.ingredients.map(String) : [];
         await this.dishRepo.update(dishId, { description, ingredients });
+        this.logger.log(`레시피 저장 완료 [dish ${dishId}]`);
       }),
     );
-    this.logger.log(`[TIMING] 레시피 저장: ${Date.now() - tRecipe}ms (${items.length}개)`);
   }
 
   private async fetchAndUploadImage(dishName: string, dishId: number): Promise<void> {
@@ -584,6 +584,7 @@ const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash','gemini-3.1-flash-lite','
     const key = `dishes/${dishId}.${ext}`;
     await this.s3.send(new PutObjectCommand({
       Bucket: this.s3Bucket,
+
       Key: key,
       Body: Buffer.from(imageRes.data),
       ContentType: contentType,
