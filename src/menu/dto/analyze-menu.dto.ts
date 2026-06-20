@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsArray, IsInt, IsNumber, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsInt, IsNumber, IsOptional, IsString, ValidateNested } from 'class-validator';
 
 class MenuItemDto {
   @IsString()
@@ -31,4 +31,8 @@ export class AnalyzeMenuDto {
   @ValidateNested({ each: true })
   @Type(() => MenuItemDto)
   menu_items!: MenuItemDto[];
+
+  @IsOptional()
+  @IsString()
+  departure_language?: string;
 }

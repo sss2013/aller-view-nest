@@ -18,6 +18,13 @@ import { GetDishDetailsDto } from './dto/get-dish-details.dto';
 interface DishCacheEntry {
   dish_id: number;
   allergy_ids: number[];
+  korean_name: string | null;
+  meat_ratio: number;
+  seafood_ratio: number;
+  vegetable_ratio: number;
+  spicy_ratio: number;
+  salty_ratio: number;
+  sweet_ratio: number;
 }
 
 interface LlmAnalysisItem {
@@ -34,9 +41,30 @@ interface LlmAnalysisItem {
   sweet_ratio: number;
 }
 
-function buildAnalyzePrompt(nameList: string): string {
-  return `아래 음식 목록을 분석해줘.
+const LANGUAGE_CUISINE_MAP: Record<string, string> = {
+  ja: '일본',
+  en: '영어권(서양)',
+  ko: '한국',
+  es: '스페인',
+  fr: '프랑스',
+  de: '독일',
+  it: '이탈리아',
+  pt: '포르투갈',
+  vi: '베트남',
+  th: '태국',
+  id: '인도네시아',
+  ar: '아랍',
+  ru: '러시아',
+  'zh-CN': '중국(간체)',
+  'zh-TW': '중국(번체)',
+};
 
+function buildAnalyzePrompt(nameList: string, departureLanguage?: string): string {
+  const cuisineHint = departureLanguage && LANGUAGE_CUISINE_MAP[departureLanguage]
+    ? `\n이 메뉴는 ${LANGUAGE_CUISINE_MAP[departureLanguage]} 음식점의 메뉴입니다. 알레르겐·칼로리·카테고리를 해당 나라 음식 기준으로 분석해줘.\n`
+    : '';
+  return `아래 음식 목록을 분석해줘.
+${cuisineHint}
 ${nameList}
 
 각 음식에 대해:
@@ -128,36 +156,89 @@ export class MenuService {
     type MissItem = { item_id: string; normalized_text: string; cacheKey: string };
     const missItems: MissItem[] = [];
 
-    for (const item of dto.menu_items) {
-      const cacheKey = `menu:dish:${item.normalized_text.replace(/\s+/g, '').toLowerCase()}`;
-      const cached = await this.redis.get<DishCacheEntry>(cacheKey);
+    // Phase 1: Redis 병렬 조회
+    const l1Results = await Promise.all(
+      dto.menu_items.map(async (item) => {
+        const cacheKey = `menu:dish:${item.normalized_text.replace(/\s+/g, '').toLowerCase()}`;
+        const cached = await this.redis.get<DishCacheEntry>(cacheKey);
+        return { item, cacheKey, cached };
+      }),
+    );
+
+    const redisMisses: { item: (typeof dto.menu_items)[0]; cacheKey: string }[] = [];
+    for (const { item, cacheKey, cached } of l1Results) {
       if (cached) { dishDataMap.set(item.item_id, cached); continue; }
-
-      const nameNoSpace = item.normalized_text.replace(/\s+/g, '');
-      const existingDish = await this.dishRepo
-        .createQueryBuilder('d')
-        .where("REPLACE(d.korean_name, ' ', '') ILIKE :name", { name: nameNoSpace })
-        .getOne();
-
-      if (existingDish) {
-        const allergenCache = await this.allergenCacheRepo.findOne({ where: { dish_id: existingDish.id } });
-        const entry: DishCacheEntry = { dish_id: existingDish.id, allergy_ids: allergenCache?.allergy_ids ?? [] };
-        await this.redis.set(cacheKey, entry, { ex: 86400 });
-        dishDataMap.set(item.item_id, entry);
-        continue;
-      }
-
-      missItems.push({ item_id: item.item_id, normalized_text: item.normalized_text, cacheKey });
+      redisMisses.push({ item, cacheKey });
     }
+
+    // Phase 2: DB 단일 배치 쿼리
+    if (redisMisses.length > 0) {
+      const qb = this.dishRepo.createQueryBuilder('d');
+      redisMisses.forEach(({ item }, i) => {
+        const nameNoSpace = item.normalized_text.replace(/\s+/g, '');
+        qb[i === 0 ? 'where' : 'orWhere'](
+          `REPLACE(d.korean_name, ' ', '') ILIKE :n${i}`, { [`n${i}`]: nameNoSpace },
+        );
+      });
+      const dishes = await qb.getMany();
+
+      if (dishes.length > 0) {
+        const dishIds = dishes.map((d) => d.id);
+        const [allergenCaches, categoryVectors] = await Promise.all([
+          this.allergenCacheRepo.find({ where: { dish_id: In(dishIds) } }),
+          this.categoryVectorRepo.find({ where: { dish_id: In(dishIds) } }),
+        ]);
+        const allergenMap = new Map(allergenCaches.map((a) => [a.dish_id, a]));
+        const vectorMap = new Map(categoryVectors.map((v) => [v.dish_id, v]));
+        const dishByName = new Map(
+          dishes.map((d) => [(d.korean_name ?? '').replace(/\s+/g, '').toLowerCase(), d]),
+        );
+
+        for (const { item, cacheKey } of redisMisses) {
+          const nameNoSpace = item.normalized_text.replace(/\s+/g, '').toLowerCase();
+          const dish = dishByName.get(nameNoSpace);
+          if (dish && allergenMap.get(dish.id) && vectorMap.get(dish.id)) {
+            const vec = vectorMap.get(dish.id)!;
+            const entry: DishCacheEntry = {
+              dish_id: dish.id,
+              allergy_ids: allergenMap.get(dish.id)!.allergy_ids,
+              korean_name: dish.korean_name ?? null,
+              meat_ratio: Number(vec.meat_ratio),
+              seafood_ratio: Number(vec.seafood_ratio),
+              vegetable_ratio: Number(vec.vegetable_ratio),
+              spicy_ratio: Number(vec.spicy_ratio),
+              salty_ratio: Number(vec.salty_ratio),
+              sweet_ratio: Number(vec.sweet_ratio),
+            };
+            await this.redis.set(cacheKey, entry, { ex: 86400 });
+            dishDataMap.set(item.item_id, entry);
+          } else {
+            missItems.push({ item_id: item.item_id, normalized_text: item.normalized_text, cacheKey });
+          }
+        }
+      } else {
+        for (const { item, cacheKey } of redisMisses) {
+          missItems.push({ item_id: item.item_id, normalized_text: item.normalized_text, cacheKey });
+        }
+      }
+    }
+
     this.logger.log(`[TIMING] L1/L2 조회: ${Date.now() - t0}ms (miss ${missItems.length}/${dto.menu_items.length})`);
 
     // 2. 미스 항목 일괄 Gemini 호출
     if (missItems.length > 0) {
       const tLlm = Date.now();
-      const analyses = await this.analyzeBatch(missItems.map((m) => m.normalized_text));
-      this.logger.log(`[TIMING] LLM 배치 호출: ${Date.now() - tLlm}ms (${missItems.length}개)`);
+      const CHUNK_SIZE = 10;
+      const names = missItems.map((m) => m.normalized_text);
+      const chunks: string[][] = [];
+      for (let i = 0; i < names.length; i += CHUNK_SIZE) {
+        chunks.push(names.slice(i, i + CHUNK_SIZE));
+      }
+      const chunkResults = await Promise.all(chunks.map((chunk) => this.analyzeBatch(chunk, dto.departure_language)));
+      const analyses = chunkResults.flat();
+      this.logger.log(`[TIMING] LLM 배치 호출: ${Date.now() - tLlm}ms (${missItems.length}개, ${chunks.length}청크 병렬)`);
 
-      const tDb = Date.now();
+      const tDb = Date.now(); // eslint-disable-line @typescript-eslint/no-unused-vars
       const imageUploadQueue: { query: string; dishId: number }[] = [];
       const recipeQueue: { dishId: number; name: string }[] = [];
 
@@ -198,12 +279,21 @@ export class MenuService {
           imageUploadQueue.push({ query: imageQuery, dishId: newDish.id });
           recipeQueue.push({ dishId: newDish.id, name: normalized_text });
 
-          const entry: DishCacheEntry = { dish_id: newDish.id, allergy_ids: allergyIds };
+          const entry: DishCacheEntry = {
+            dish_id: newDish.id,
+            allergy_ids: allergyIds,
+            korean_name: normalized_text,
+            meat_ratio,
+            seafood_ratio,
+            vegetable_ratio,
+            spicy_ratio: Math.min(1, Math.max(0, analysis.spicy_ratio)),
+            salty_ratio: Math.min(1, Math.max(0, analysis.salty_ratio)),
+            sweet_ratio: Math.min(1, Math.max(0, analysis.sweet_ratio)),
+          };
           await this.redis.set(cacheKey, entry, { ex: 86400 });
           dishDataMap.set(item_id, entry);
         }),
       );
-      this.logger.log(`[TIMING] DB 저장: ${Date.now() - tDb}ms`);
 
       // 이미지 업로드는 순차 실행 (CDN 쓰로틀링 방지)
       (async () => {
@@ -309,35 +399,33 @@ export class MenuService {
       };
     });
 
-    return this.computeRecommendations(dto, menu_results);
+    return this.computeRecommendations(dto, menu_results, dishDataMap);
   }
 
-  private async computeRecommendations(dto: AnalyzeMenuDto, menu_results: any[]) {
-    const safeDishIds = menu_results
-      .filter((r) => r.risk_level === 'safe')
-      .map((r) => r.dish_id as number);
+  private computeRecommendations(dto: AnalyzeMenuDto, menu_results: any[], dishDataMap: Map<string, DishCacheEntry>) {
+    const safeItemIds = new Set(
+      menu_results.filter((r) => r.risk_level === 'safe').map((r) => r.item_id as string),
+    );
 
-    if (safeDishIds.length === 0) {
+    if (safeItemIds.size === 0) {
       return { menu_results, recommendations: { category: [], taste: [] } };
     }
-
-    const vectors = await this.categoryVectorRepo.find({ where: { dish_id: In(safeDishIds) } });
-    const dishes = await this.dishRepo.find({ where: { id: In(safeDishIds) } });
-    const dishMap = new Map(dishes.map((d) => [d.id, d]));
-    const dishIdToItemId = new Map(
-      menu_results.filter((r) => r.dish_id).map((r) => [r.dish_id as number, r.item_id]),
-    );
 
     const { meat, seafood, vegetarian, spicy, salty, sweet } = dto.user_preferences;
     const catSum = (meat + seafood + vegetarian) || 1;
     const tasteSum = (spicy + salty + sweet) || 1;
 
-    const base = vectors.map((vec) => ({
-      item_id: dishIdToItemId.get(vec.dish_id) ?? '',
-      korean_name: dishMap.get(vec.dish_id)?.korean_name ?? null,
-      catScore: (meat * Number(vec.meat_ratio) + seafood * Number(vec.seafood_ratio) + vegetarian * Number(vec.vegetable_ratio)) / catSum,
-      tasteScore: (spicy * Number(vec.spicy_ratio) + salty * Number(vec.salty_ratio) + sweet * Number(vec.sweet_ratio)) / tasteSum,
-    }));
+    const base = dto.menu_items
+      .filter((item) => safeItemIds.has(item.item_id) && dishDataMap.has(item.item_id))
+      .map((item) => {
+        const d = dishDataMap.get(item.item_id)!;
+        return {
+          item_id: item.item_id,
+          korean_name: d.korean_name,
+          catScore: (meat * d.meat_ratio + seafood * d.seafood_ratio + vegetarian * d.vegetable_ratio) / catSum,
+          tasteScore: (spicy * d.spicy_ratio + salty * d.salty_ratio + sweet * d.sweet_ratio) / tasteSum,
+        };
+      });
 
     const category = [...base].sort((a, b) => b.catScore - a.catScore).slice(0, 3).map(({ item_id, korean_name }) => ({ item_id, korean_name }));
     const taste = [...base].sort((a, b) => b.tasteScore - a.tasteScore).slice(0, 3).map(({ item_id, korean_name }) => ({ item_id, korean_name }));
@@ -345,48 +433,49 @@ export class MenuService {
     return { menu_results, recommendations: { category, taste } };
   }
 
-  private async analyzeBatch(menuNames: string[]) {
+  private async analyzeBatch(menuNames: string[], departureLanguage?: string) {
     try {
-      return await this.analyzeBatchWithGroq(menuNames);
+      return await this.analyzeBatchWithGroq(menuNames, departureLanguage);
     } catch (err) {
       this.logger.warn(`Groq 실패, Gemini 폴백: ${err}`);
-      return this.analyzeBatchWithGemini(menuNames);
+      return this.analyzeBatchWithGemini(menuNames, departureLanguage);
     }
   }
 
-  private async analyzeBatchWithGroq(menuNames: string[]) {
+  private async analyzeBatchWithGroq(menuNames: string[], departureLanguage?: string) {
     const defaultItem = { english_name: '', image_search_query: '', allergens: [], calorie_min: null, calorie_max: null, meat_ratio: 0, seafood_ratio: 0, vegetable_ratio: 0, spicy_ratio: 0, salty_ratio: 0, sweet_ratio: 0 };
+    const GROQ_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
     const nameList = menuNames.map((n, i) => `${i + 1}. ${n}`).join('\n');
-    const prompt = buildAnalyzePrompt(nameList);
+    const prompt = buildAnalyzePrompt(nameList, departureLanguage);
 
-    const tGroq = Date.now();
-    const completion = await this.groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.1,
-    });
-    this.logger.log(`[TIMING] Groq(llama-3.3-70b-versatile) 응답: ${Date.now() - tGroq}ms`);
+    for (const model of GROQ_MODELS) {
+      try {
+        const completion = await this.groq.chat.completions.create({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1,
+        });
+        const text = completion.choices[0]?.message?.content?.trim() ?? '';
+        const jsonMatch = text.match(/\[[\s\S]*\]/);
+        if (!jsonMatch) throw new Error(`Groq JSON 파싱 실패: ${text}`);
 
-    const text = completion.choices[0]?.message?.content?.trim() ?? '';
-    this.logger.debug(`Groq batch response: ${text}`);
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) throw new Error(`Groq JSON 파싱 실패: ${text}`);
+        const parsed: any[] = JSON.parse(jsonMatch[0]);
+        return menuNames.map((_, i) => parseLlmItem(parsed[i], defaultItem));
+      } catch (err) {
+        this.logger.warn(`Groq(${model}) 실패, 다음 모델 시도: ${err}`);
+      }
+    }
 
-    const parsed: any[] = JSON.parse(jsonMatch[0]);
-    parsed.forEach((item, i) => {
-      this.logger.debug(`[번역] ${menuNames[i]} → ${item?.english_name ?? '(없음)'} | 검색쿼리: ${item?.image_search_query ?? '(없음)'}`);
-    });
-
-    return menuNames.map((_, i) => parseLlmItem(parsed[i], defaultItem));
+    throw new Error('모든 Groq 모델 실패');
   }
 
-  private async analyzeBatchWithGemini(menuNames: string[]) {
+  private async analyzeBatchWithGemini(menuNames: string[], departureLanguage?: string) {
     const defaultItem = { english_name: '', image_search_query: '', allergens: [], calorie_min: null, calorie_max: null, meat_ratio: 0, seafood_ratio: 0, vegetable_ratio: 0, spicy_ratio: 0, salty_ratio: 0, sweet_ratio: 0 };
     const defaults = menuNames.map(() => ({ ...defaultItem }));
 
-    const MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-Lite', 'gemini-3-flash', 'gemini-3.1-flash-Lite'];
+    const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash','gemini-3.1-flash-lite','gemini-2.5-flash-lite'];
     const nameList = menuNames.map((n, i) => `${i + 1}. ${n}`).join('\n');
-    const prompt = buildAnalyzePrompt(nameList);
+    const prompt = buildAnalyzePrompt(nameList, departureLanguage);
 
     for (const modelName of MODELS) {
       try {
@@ -394,20 +483,15 @@ export class MenuService {
           model: modelName,
           generationConfig: { thinkingConfig: { thinkingBudget: 1024 } } as any,
         });
-        const tModel = Date.now();
+        this.logger.log(`[LLM] Gemini 폴백 사용: ${modelName}`);
         const result = await model.generateContent(prompt);
-        this.logger.log(`[TIMING] Gemini(${modelName}) 응답: ${Date.now() - tModel}ms`);
         const text = result.response.text().trim();
-        this.logger.debug(`Gemini(${modelName}) batch response: ${text}`);
         const jsonMatch = text.match(/\[[\s\S]*\]/);
         if (!jsonMatch) {
-          this.logger.warn(`Gemini(${modelName}) JSON 파싱 실패: ${text}`);
+          this.logger.warn(`Gemini(${modelName}) JSON 파싱 실패`);
           continue;
         }
         const parsed: any[] = JSON.parse(jsonMatch[0]);
-        parsed.forEach((item, i) => {
-          this.logger.debug(`[번역] ${menuNames[i]} → ${item?.english_name ?? '(없음)'} | 검색쿼리: ${item?.image_search_query ?? '(없음)'}`);
-        });
         return menuNames.map((_, i) => parseLlmItem(parsed[i], defaultItem));
       } catch (err) {
         this.logger.warn(`Gemini(${modelName}) 실패, 다음 모델 시도: ${err}`);
@@ -425,25 +509,34 @@ export class MenuService {
     const prompt = buildRecipePrompt(nameList);
 
     let parsed: any[] = [];
-    try {
-      const completion = await this.groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2,
-      });
-      const text = completion.choices[0]?.message?.content?.trim() ?? '';
-      const jsonMatch = text.match(/\[[\s\S]*\]/);
-      if (!jsonMatch) throw new Error(`Groq recipe JSON 파싱 실패: ${text}`);
-      parsed = JSON.parse(jsonMatch[0]);
-    } catch (err) {
-      this.logger.warn(`Groq recipe 실패, Gemini 폴백: ${err}`);
-      const MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-Lite'];
-      for (const modelName of MODELS) {
+    const GROQ_RECIPE_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'];
+    let groqSuccess = false;
+    for (const model of GROQ_RECIPE_MODELS) {
+      try {
+        const completion = await this.groq.chat.completions.create({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.2,
+        });
+        const text = completion.choices[0]?.message?.content?.trim() ?? '';
+        const jsonMatch = text.match(/\[[\s\S]*\]/);
+        if (!jsonMatch) throw new Error(`Groq(${model}) recipe JSON 파싱 실패: ${text}`);
+        parsed = JSON.parse(jsonMatch[0]);
+        groqSuccess = true;
+        break;
+      } catch (err) {
+        this.logger.warn(`Groq(${model}) recipe 실패, 다음 시도: ${err}`);
+      }
+    }
+    if (!groqSuccess) {
+      this.logger.warn('모든 Groq recipe 모델 실패, Gemini 폴백');
+const MODELS = ['gemini-2.5-flash', 'gemini-3.5-flash','gemini-3.1-flash-lite','gemini-2.5-flash-lite'];      for (const modelName of MODELS) {
         try {
           const model = this.gemini.getGenerativeModel({
             model: modelName,
             generationConfig: { thinkingConfig: { thinkingBudget: 512 } } as any,
           });
+          this.logger.log(`[LLM] 레시피 Gemini 폴백 사용: ${modelName}`);
           const result = await model.generateContent(prompt);
           const text = result.response.text().trim();
           const jsonMatch = text.match(/\[[\s\S]*\]/);
@@ -458,6 +551,7 @@ export class MenuService {
 
     if (parsed.length === 0) { this.logger.warn('레시피 LLM 응답 없음'); return; }
 
+    const tRecipe = Date.now();
     await Promise.all(
       items.map(async ({ dishId }, i) => {
         const item = parsed[i];
@@ -465,16 +559,15 @@ export class MenuService {
         const description = typeof item.description === 'string' ? item.description : null;
         const ingredients = Array.isArray(item.ingredients) ? item.ingredients.map(String) : [];
         await this.dishRepo.update(dishId, { description, ingredients });
-        this.logger.log(`레시피 저장 완료 [dish ${dishId}]`);
       }),
     );
+    this.logger.log(`[TIMING] 레시피 저장: ${Date.now() - tRecipe}ms (${items.length}개)`);
   }
 
   private async fetchAndUploadImage(dishName: string, dishId: number): Promise<void> {
     if (!this.pexelsApiKey || !this.s3Bucket) return;
 
     const searchQuery = dishName;
-    this.logger.debug(`[이미지 검색] query: "${searchQuery}"`);
 
     const searchRes = await axios.get('https://api.pexels.com/v1/search', {
       params: { query: searchQuery, per_page: 1 },
@@ -483,8 +576,6 @@ export class MenuService {
     });
     const imageUrl: string | undefined = searchRes.data?.photos?.[0]?.src?.medium;
     if (!imageUrl) { this.logger.warn(`이미지 검색 결과 없음: ${dishName}`); return; }
-
-    this.logger.debug(`[이미지 선택] dish ${dishId}: ${imageUrl}`);
 
     const imageRes = await axios.get<Buffer>(imageUrl, { responseType: 'arraybuffer', timeout: 15000 });
     const contentType: string = imageRes.headers['content-type'] ?? 'image/jpeg';
@@ -501,6 +592,5 @@ export class MenuService {
     const region = this.configService.get<string>('AWS_REGION', 'us-east-1');
     const s3Url = `https://${this.s3Bucket}.s3.${region}.amazonaws.com/${key}`;
     await this.dishRepo.update(dishId, { image_url: s3Url });
-    this.logger.log(`이미지 저장 완료 [dish ${dishId}]: ${s3Url}`);
   }
 }
